@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog,
 import battery  # noqa: E402
 
 APP_NAME = "Rainy75Desktop"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.3"
 IPC_NAME = "Rainy75Desktop_ipc"
 WEB_DRIVER_URL = "https://www.wobwxe.com/"
 CONFIG_DIR = os.path.join(os.environ.get("APPDATA", "."), APP_NAME)
@@ -354,7 +354,7 @@ class BatteryPopup(QWidget):
         if percent is None:
             self.lbl_pct.setText("--")
             self.bar.set_state(0, battery_color(None))
-            self.lbl_info.setText("未检测到键盘（睡眠或未连接）")
+            self.lbl_info.setText("键盘未应答 — 请确认接收器已插好、键盘已开机")
             return
         self.bar.set_state(percent, battery_color(percent))
         self.lbl_pct.setText(f"{'⚡' if charging else ''}{percent}%")
@@ -510,6 +510,16 @@ class TrayApp:
         self.tray.setToolTip(self._tooltip(ok))
         self.popup.update_data(self.percent, bool(self.status), ok,
                                self.last_ok)
+        # 键盘睡眠不应答 → 面板开着时自动重试；用户敲键唤醒后即可读到
+        if not ok and self.popup.isVisible():
+            self.popup.lbl_info.setText("键盘未应答 — 正在自动重试…")
+            QTimer.singleShot(3000, self._auto_retry)
+
+    def _auto_retry(self):
+        if (self.popup.isVisible() and not self._query_inflight
+                and (self.last_ok is None
+                     or time.time() - self.last_ok > self.FRESH_SECS)):
+            self.refresh()
 
     def _on_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -530,7 +540,7 @@ class TrayApp:
         if self._query_inflight:
             return
         self._query_inflight = True
-        self.popup.lbl_info.setText("正在查询…")
+        self.popup.lbl_info.setText("正在查询…（最长约 15 秒）")
         self.poller.refresh_now()
 
     def open_settings(self):

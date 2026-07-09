@@ -2,10 +2,12 @@
 # 逆向自 wobwxe.com 网页驱动：vendor collection usagePage 0xFF1C，reportId 4，
 # 命令帧 [chkLo, chkHi, cmd=26, arg=6]，响应第 8 字节(含 report id)=电量百分比。
 #
-# 2.4G 注意事项（实测教训）：
-# - 回包有 ~2-5s 固有延迟（RF 时隙），多发帧无益；
-# - 命令帧与按键报文共享信道，打字时发帧可能挤丢 key-up 造成"键粘连"
-#   → 只在系统键鼠空闲 ≥ IDLE_GATE 秒时才发帧；
+# 2.4G 注意事项（实测教训，2026-07 三分钟探测定量验证）：
+# - 回包按 ~5s 一班的节奏到达，且从首帧到第一个回包可能要 5~12s
+#   → 监听窗口必须 ≥15s，期间每 ~1.5s 补一帧、全程持续读；
+# - 键盘长时间空闲(实测 idle 5 分钟)也照常应答，"睡眠不应答"是误判；
+# - 命令帧与按键报文共享信道，打字瞬间发帧可能挤丢 key-up 造成"键粘连"
+#   → 每帧发送前要求键鼠空闲 ≥ IDLE_GATE（0.3s，打字间隙即可满足）；
 # - 不持久占用 HID 句柄，查询完立即释放。
 import ctypes
 import logging
@@ -18,10 +20,9 @@ log = logging.getLogger("battery")
 VID = 0x320F
 USAGE_PAGE = 0xFF1C
 BATTERY_FRAME = bytes([4, 32, 0, 26, 6] + [0] * 59)
-ATTEMPTS = 2          # 最多发 2 帧
-ATTEMPT_WAIT = 3.0    # 每帧等 3s
-IDLE_GATE = 1.2       # 键鼠空闲 ≥1.2s 才允许发帧
-IDLE_MAX_WAIT = 6.0   # 等不到空闲最多等 6s，放弃本次查询
+WINDOW = 15.0         # 监听窗口（回包最长 ~12s 才来，不能再短）
+FRAME_GAP = 1.5       # 补帧间隔
+IDLE_GATE = 0.3       # 每帧要求键鼠空闲 ≥0.3s（避开打字瞬间）
 
 
 class _LASTINPUTINFO(ctypes.Structure):
@@ -36,15 +37,6 @@ def _idle_seconds():
     return (ctypes.windll.kernel32.GetTickCount() - info.dwTime) / 1000.0
 
 
-def _wait_for_idle():
-    deadline = time.time() + IDLE_MAX_WAIT
-    while time.time() < deadline:
-        if _idle_seconds() >= IDLE_GATE:
-            return True
-        time.sleep(0.2)
-    return False
-
-
 def find_device_path():
     for d in hid.enumerate(VID):
         if d["usage_page"] == USAGE_PAGE:
@@ -53,7 +45,11 @@ def find_device_path():
 
 
 def query_battery():
-    """返回 (percent, status) 或 None。只在键鼠空闲时发帧，避免干扰按键。"""
+    """返回 (percent, status) 或 None。
+
+    15s 窗口内每 ~1.5s 补一帧（每帧要求键鼠短暂空闲），全程持续监听，
+    命中即返回。
+    """
     t_start = time.time()
     path = find_device_path()
     if not path:
@@ -70,28 +66,23 @@ def query_battery():
         for _ in range(8):                      # 清掉上次的迟到回包
             if not dev.read(65, timeout_ms=1):
                 break
-        for attempt in range(1, ATTEMPTS + 1):
-            if not _wait_for_idle():
-                log.info("query: user typing, skipped (%.1fs)",
-                         time.time() - t_start)
-                return None
-            try:
+        sent = 0
+        next_send = 0.0
+        while time.time() - t_start < WINDOW:
+            if time.time() >= next_send and _idle_seconds() >= IDLE_GATE:
                 dev.write(BATTERY_FRAME)
-            except OSError:
-                log.warning("write failed (attempt %d)", attempt)
-                return None
-            t0 = time.time()
-            while time.time() - t0 < ATTEMPT_WAIT:
-                r = dev.read(65, timeout_ms=120)
-                if r and len(r) >= 10 and r[0] == 4 and r[3] == 26:
-                    percent, status = r[8], r[9]
-                    if 0 < percent <= 100:
-                        log.info("query: %d%% status=%d (attempt %d, %.1fs)",
-                                 percent, status, attempt,
-                                 time.time() - t_start)
-                        return percent, status
-        log.info("query: no response after %d attempts (%.1fs) — keyboard "
-                 "asleep or off", ATTEMPTS, time.time() - t_start)
+                sent += 1
+                next_send = time.time() + FRAME_GAP
+            r = dev.read(65, timeout_ms=100)
+            if r and len(r) >= 10 and r[0] == 4 and r[3] == 26:
+                percent, status = r[8], r[9]
+                if 0 < percent <= 100:
+                    log.info("query: %d%% status=%d (%d frames, %.1fs)",
+                             percent, status, sent, time.time() - t_start)
+                    return percent, status
+                log.warning("query: implausible payload %s", list(r[:12]))
+        log.info("query: no response (%d frames, %.1fs) — receiver absent "
+                 "or keyboard off", sent, time.time() - t_start)
         return None
     except OSError:
         log.warning("device I/O error mid-query")
