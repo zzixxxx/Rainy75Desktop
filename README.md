@@ -1,5 +1,5 @@
 # Rainy75Desktop
-
+# 不好用 不用了
 WOB Rainy75 键盘的 Windows 托盘电量助手 —— 2.4G 连接下也能看电量百分比。
 
 官方桌面驱动和网页驱动都不显示电量百分比，本工具通过逆向 [WOB 网页驱动](https://www.wobwxe.com/) 的 WebHID 协议实现电量读取，UI 交互参考 [AirPodsDesktop](https://github.com/SpriteOvO/AirPodsDesktop)。
